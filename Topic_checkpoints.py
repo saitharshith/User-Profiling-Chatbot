@@ -140,7 +140,7 @@ def process_all_conversations(input_csv_path, output_json_path):
     print(f"\nProcessing complete! Successfully saved {len(all_results)} conversations to {output_json_path}")
 
 if __name__ == "__main__":
-    input_file = r'/kaggle/working/User-Profiling-Chatbot/Topic_checkpoints.py'
+    input_file = r'/kaggle/working/User-Profiling-Chatbot/dataset/conversations.csv'
     output_file = r'/kaggle/working/User-Profiling-Chatbot/dataset/processed_checkpoints.json'
     output_dir = os.path.dirname(output_file)
     if output_dir:
