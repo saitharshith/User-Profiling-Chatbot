@@ -2,3 +2,7 @@ groq
 pandas
 python-dotenv
 tqdm
+transformers
+torch
+accelerate
+bitsandbytes
