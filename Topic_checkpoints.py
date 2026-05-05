@@ -1,94 +1,77 @@
 import os
 import json
 import re
-import pandas as pd
 import torch
+import pandas as pd
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
+MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash" 
 
-print("Loading Tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
-
-print("Loading Model in 4-bit Quantization onto Kaggle GPU...")
+print(f"Loading {MODEL_ID} into GPU VRAM...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    device_map="auto", # Automatically distributes across Kaggle's T4 GPUs
-    load_in_4bit=True, # CRITICAL: Prevents Out of Memory (OOM) errors on Kaggle
-    torch_dtype=torch.float16,
-    token=HF_TOKEN
+    device_map="auto",
+    torch_dtype=torch.bfloat16, 
 )
 
-# Initialize the text-generation pipeline
-pipe = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    pad_token_id=tokenizer.eos_token_id
-)
+def generate_hf_response(messages, max_new_tokens=150, temperature=0.0):
+    """Handles the tokenization, generation, and decoding for the local model."""
+    # Apply the specific chat template (ChatML, etc.) expected by the model
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt"
+    ).to(model.device)
 
-# --- LLM INFERENCE FUNCTIONS ---
+    # Generate output
+    with torch.no_grad():
+        outputs = model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=False, # Deterministic greedy decoding
+            pad_token_id=tokenizer.eos_token_id
+        )
 
-def get_local_llm_response(prompt, system_prompt="You are a helpful assistant.", max_new_tokens=10):
-    """Uses the local Llama 3 pipeline with strict chat formatting."""
+    # Slice the output to return only the newly generated tokens (ignore the prompt)
+    generated_ids = outputs[0][input_ids.shape[1]:]
+    return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+def clean_json_output(raw_text):
+    """Regex helper to extract JSON from markdown or chatty output."""
+    try:
+        # Search for anything looking like a JSON object {...}
+        match = re.search(r'\{[\s\S]*\}', raw_text)
+        if match:
+            json_str = match.group(0)
+            return json.loads(json_str)
+        else:
+            return {"topic_label": "Unknown", "summary": raw_text}
+    except json.JSONDecodeError:
+        return {"topic_label": "Error", "summary": "Failed to parse JSON."}
+
+def extract_topic_and_summary_hf(segment_text):
+    """Few-shot engineered prompt tailored for local instruction models."""
+    system_prompt = """You are a precise data extraction algorithm. Your ONLY task is to output a single, valid JSON object. Do not include markdown code blocks. Do not add conversational text.
+
+{
+  "topic_label": "2 to 4 words describing the topic",
+  "summary": "One objective sentence summarizing the dialogue"
+}"""
+
+    user_prompt = f"CONVERSATION SEGMENT:\n{segment_text}\n\nOUTPUT STRICT JSON:"
+    
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": user_prompt}
     ]
     
-    # Format the prompt using Llama 3's specific control tokens
-    prompt_str = tokenizer.apply_chat_template(
-        messages, 
-        tokenize=False, 
-        add_generation_prompt=True
-    )
-    
-    outputs = pipe(
-        prompt_str,
-        max_new_tokens=max_new_tokens,
-        temperature=0.1, # Keep it deterministic
-        do_sample=False,
-        return_full_text=False # Only return the generated answer, not the prompt
-    )
-    
-    return outputs[0]["generated_text"].strip()
+    raw_response = generate_hf_response(messages, max_new_tokens=150, temperature=0.0)
+    return clean_json_output(raw_response)
 
-def extract_topic_and_summary(segment_text):
-    """Extracts the JSON data locally. Includes regex fallback for safety."""
-    system_prompt = """You are a precise data extraction API. Your ONLY objective is to analyze a conversation segment and output a strict JSON object.
-RULES:
-1. `topic_label`: Must be exactly 2 to 4 words. No prefixes.
-2. `summary`: Must be exactly one concise, objective sentence.
-EXAMPLE OUTPUT:
-{"topic_label": "Career and Travel", "summary": "User 1 shares their plans to move to Portland."}"""
-
-    user_prompt = f"CONVERSATION SEGMENT:\n{segment_text}"
-    
-    raw_response = get_local_llm_response(
-        prompt=user_prompt, 
-        system_prompt=system_prompt, 
-        max_new_tokens=150 
-    )
-    
-    # Defensive parsing: Local LLMs might occasionally wrap JSON in markdown (```json ... ```)
-    try:
-        # First attempt: parse directly
-        return json.loads(raw_response)
-    except json.JSONDecodeError:
-        try:
-            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            else:
-                raise ValueError("No JSON found")
-        except Exception:
-            return {"topic_label": "Unknown", "summary": raw_response.replace('\n', ' ')}
-
-
-
-def process_conversation_locally(conv_text, conv_id):
+def process_conversation_hf(conv_text, conv_id):
     messages = [msg.strip() for msg in conv_text.split('\n') if msg.strip()]
     
     checkpoints = []
@@ -101,22 +84,25 @@ def process_conversation_locally(conv_text, conv_id):
         msg_index = i + 1
         
         if len(current_segment) > 1:
-            monitor_prompt = f"Current Context: {current_topic_label}\nLast messages: {current_segment[-3:-1]}\nNew Message: {msg}\nDoes the 'New Message' introduce a new topic? Respond with one word: 'CHANGE' or 'CONTINUE'."
-            decision = get_local_llm_response(
-                prompt=monitor_prompt, 
-                system_prompt="You are a strict topic detection monitor. Output exactly one word.",
-                max_new_tokens=5 
-            )
+            monitor_sys = "You are a logical topic-tracking monitor. Reply with exactly one word: 'CHANGE' or 'CONTINUE'."
+            monitor_user = f"Current Topic: {current_topic_label}\nPrevious messages: {current_segment[-3:-1]}\nNew Message: {msg}\n\nDoes the New Message start a significantly new topic? Answer CHANGE or CONTINUE."
+            
+            hf_messages = [
+                {"role": "system", "content": monitor_sys},
+                {"role": "user", "content": monitor_user}
+            ]
+            
+            decision = generate_hf_response(hf_messages, max_new_tokens=10, temperature=0.0)
             
             if "CHANGE" in decision.upper():
                 segment_text = " ".join(current_segment[:-1])
-                extracted_data = extract_topic_and_summary(segment_text)
+                extracted_data = extract_topic_and_summary_hf(segment_text)
                 
                 checkpoints.append({
                     "topic_id": len(checkpoints) + 1,
                     "range": f"{start_index}-{msg_index-1}",
                     "topic_label": extracted_data.get("topic_label", "Unknown"),
-                    "summary": extracted_data.get("summary", "No summary generated.")
+                    "summary": extracted_data.get("summary", "No summary available.")
                 })
                 
                 start_index = msg_index
@@ -125,47 +111,37 @@ def process_conversation_locally(conv_text, conv_id):
 
     if current_segment:
         segment_text = " ".join(current_segment)
-        extracted_data = extract_topic_and_summary(segment_text)
+        extracted_data = extract_topic_and_summary_hf(segment_text)
         checkpoints.append({
             "topic_id": len(checkpoints) + 1,
             "range": f"{start_index}-{len(messages)}",
             "topic_label": extracted_data.get("topic_label", "Unknown"),
-            "summary": extracted_data.get("summary", "No summary generated.")
+            "summary": extracted_data.get("summary", "No summary available.")
         })
 
     return {"conversation_id": conv_id, "checkpoints": checkpoints}
 
 
 if __name__ == "__main__":
-    input_file = '/kaggle/working/dataset/conversations.csv'
-    output_file = '/kaggle/working/dataset/processed_checkpoints.json'
+    input_file = '/kaggle/working/dataset/your-dataset-name/conversations.csv'
+    output_file = '/kaggle/working/dataset/hf_topic_checkpoints.json'
     
-    print(f"Loading dataset...")
-    try:
-        df = pd.read_csv(input_file, header=None)
-    except FileNotFoundError:
-        print("Please update the input_file path to match your Kaggle dataset directory.")
-        
+    print(f"Loading dataset from: {input_file}")
+    df = pd.read_csv(input_file, header=None)
+    df_test = df.head(10)
     all_results = []
-    
-    for index, row in tqdm(df.iterrows(), total=df.shape[0], desc="Processing on GPU"):
+    for index, row in tqdm(df_test.iterrows(), total=df_test.shape[0], desc="Processing on Kaggle GPU"):
         conv_text = row[0]
         conv_id = index + 1
         
-        try:
-            result = process_conversation_locally(conv_text, conv_id=conv_id)
-            all_results.append(result)
-            
-            if len(all_results) % 100 == 0:
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(all_results, f, indent=2, ensure_ascii=False)
-                    
-        except Exception as e:
-            print(f"\nError on conv {conv_id}: {e}")
-            all_results.append({"conversation_id": conv_id, "error": str(e), "checkpoints": []})
+        result = process_conversation_hf(conv_text, conv_id)
+        all_results.append(result)
 
-    # Final save
+        if len(all_results) % 100 == 0:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(all_results, f, indent=2, ensure_ascii=False)
+
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
         
-    print(f"Batch processing complete! Download the JSON from the Kaggle 'Output' directory.")
+    print("Batch processing complete!")
