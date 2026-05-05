@@ -2,10 +2,10 @@ import os
 import json
 import pandas as pd
 from groq import Groq
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 import tqdm
 
-load_dotenv()
+# load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY")) 
 MODEL = "llama-3.1-8b-instant"
 
@@ -140,8 +140,8 @@ def process_all_conversations(input_csv_path, output_json_path):
     print(f"\nProcessing complete! Successfully saved {len(all_results)} conversations to {output_json_path}")
 
 if __name__ == "__main__":
-    input_file = r'dataset\conversations.csv'
-    output_file = r'dataset\processed_checkpoints.json'
+    input_file = r'/kaggle/working/User-Profiling-Chatbot/Topic_checkpoints.py'
+    output_file = r'/kaggle/working/User-Profiling-Chatbot/dataset/processed_checkpoints.json'
     output_dir = os.path.dirname(output_file)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
