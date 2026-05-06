@@ -6,3 +6,13 @@ transformers
 torch
 accelerate
 bitsandbytes
+langchain
+langchain-community 
+langchain-huggingface
+langchain-groq 
+sentence-transformers
+chroma
+langchain-chroma
+fastapi
+uvicorn
+pydantic 
