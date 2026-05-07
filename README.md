@@ -39,6 +39,13 @@ When a user asks the chatbot a question (e.g., *"What are User 1's habits in con
 
 *Why this matters:* Standard RAG often loses the "big picture" of who a person is. By injecting a dedicated JSON persona alongside the search results, the chatbot acts like a true behavioral analyst.
 
+## Chatbot screenshots
+Example 1:
+<img width="451" height="432" alt="image" src="https://github.com/user-attachments/assets/c143930f-9009-4ed1-bd2c-be89dc7fb21d" />
+Example 2:
+<img width="455" height="517" alt="image" src="https://github.com/user-attachments/assets/ea69b395-a4ae-4120-9332-2e713006652d" />
+
+
 ---
 
 ## Tech Stack
